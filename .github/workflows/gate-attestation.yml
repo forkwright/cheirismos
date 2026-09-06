@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: forkwright/kanon
-          ref: 7f0c5723e1064a66fa10dfd387c3d388f20f166f
+          ref: ca93807557555142b600a058c8faf6adc1cde389
           path: kanon
           token: ${{ secrets.FLEET_REPO_TOKEN }}
           persist-credentials: false
