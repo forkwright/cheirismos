@@ -38,6 +38,13 @@ continues to emit the closed client-request schema.
 
 ## Install an uncommissioned platform
 
+Build the reviewed revision on a Linux system compatible with the controller:
+
+```bash
+cargo build --release --locked --bin cheirismos
+sha256sum target/release/cheirismos
+```
+
 On the target host, copy the repository deployment directory and a reviewed
 release binary, then install the platform without a device rule:
 
@@ -149,6 +156,16 @@ unresolved physical work as **unknown**, never replay it. A restart or a failed
 health check requires an operator to compare durable intent, evidence, and the
 fixture before any new operation is admitted. Stop the service before an
 instrument is unplugged or its udev rule is changed.
+
+If a grant expires or is revoked before dispatch or between completed steps,
+an operator can submit `transaction/abandon_halted_run` with the exact run,
+grant, plan, immutable request ID, and a justification artifact digest. The
+supervisor records the decision, rejects remaining undispatched intents, closes
+that authority pair permanently, and releases its owned resources atomically.
+It preserves completed receipts and consumed budgets. An in-flight, partial, or
+unknown effect prevents abandonment and still requires fresh reconciliation or
+a separately reviewed recovery takeover. Generate the request shape with
+`cheirismos schema`.
 
 ## Credential rotation
 
