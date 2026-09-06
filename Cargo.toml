@@ -26,7 +26,7 @@ flatbuffers = { version = "25.2.10", default-features = false }
 hex = "0.4"
 jiff = { version = "0.2", features = ["serde"] }
 koinon = { git = "https://github.com/forkwright/koinon", rev = "e7985b67c86279a2d5ea9a31b4b55101575cdd37", default-features = false, features = ["cli"] }
-rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup"] }
 rmcp = { version = "1.2", features = ["server", "transport-io"] }
 rustix = { version = "1", features = ["fs", "process"] }
 schemars = "1"
