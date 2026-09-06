@@ -8,9 +8,10 @@ use snafu::Snafu;
 
 use crate::domain::{
     ArtifactDigest, AttemptId, AttemptRecord, AttemptState, Budget, CaseFact, CaseId,
-    CommissionedProfile, EvidenceEnvelope, EvidencePhase, Grant, GrantId, Operation,
-    OperationReceipt, PlanId, PlanProposal, PlanRun, PlannedOperation, Principal, PrincipalRole,
-    ReconciliationSetup, RecoveryTakeoverRecord, RequestId, ReviewedPlan,
+    CommissionedProfile, EvidenceEnvelope, EvidencePhase, Grant, GrantId,
+    HaltedRunAbandonmentRecord, Operation, OperationReceipt, PlanId, PlanProposal, PlanRun,
+    PlannedOperation, Principal, PrincipalRole, ReconciliationSetup, RecoveryTakeoverRecord,
+    RequestId, ReviewedPlan,
 };
 use crate::evidence::{ArtifactStore, EvidenceError, VerifiedArtifact};
 use crate::store::{
@@ -110,6 +111,18 @@ pub struct RecoveryTakeoverRequest {
     pub run: RequestId,
     pub first_attempt: AttemptId,
     pub unresolved: Vec<AttemptId>,
+    pub grant: GrantId,
+    pub plan: PlanId,
+    pub justification_evidence: ArtifactDigest,
+}
+
+/// Operator-only request to close a run that halted before any unresolved
+/// physical outcome.  The store derives the exact owned lease set atomically.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HaltedRunAbandonmentRequest {
+    pub request: RequestId,
+    pub run: RequestId,
     pub grant: GrantId,
     pub plan: PlanId,
     pub justification_evidence: ArtifactDigest,
@@ -463,6 +476,15 @@ impl Supervisor {
         if grant.agent != agent.id {
             return Err(SupervisorError::GrantPrincipal);
         }
+        if self
+            .store
+            .is_halted_pair(&request.grant, &request.plan)
+            .map_err(|source| SupervisorError::Store { source })?
+        {
+            return Err(SupervisorError::OutOfBounds {
+                reason: "plan authority was closed by a halted-run abandonment".to_owned(),
+            });
+        }
         let profile =
             self.profile(grant.profile.as_str())?
                 .ok_or_else(|| SupervisorError::Store {
@@ -660,6 +682,60 @@ impl Supervisor {
                 })
             }
         }
+    }
+
+    /// Close a halted run whose complete grant/plan history has no unresolved
+    /// physical outcome. This is deliberately authority-only and never
+    /// refunds the durable whole-plan reservation.
+    pub fn abandon_halted_run(
+        &self,
+        authority: &Principal,
+        request: HaltedRunAbandonmentRequest,
+    ) -> Result<HaltedRunAbandonmentRecord, SupervisorError> {
+        require_authority(authority)?;
+        self.artifacts
+            .resolve(&request.justification_evidence)
+            .map_err(|source| SupervisorError::OutOfBounds {
+                reason: source.to_string(),
+            })?;
+        let run = self
+            .store
+            .run(&request.run)
+            .map_err(|source| SupervisorError::Store { source })?
+            .ok_or_else(|| SupervisorError::Store {
+                source: StoreError::Missing {
+                    kind: "run",
+                    id: request.run.to_string(),
+                },
+            })?;
+        if run.grant != request.grant || run.plan != request.plan {
+            return Err(SupervisorError::OutOfBounds {
+                reason: "abandonment identity differs from the durable run".to_owned(),
+            });
+        }
+        let resources = match self
+            .store
+            .halted_run_abandonment_request(&request.request)
+            .map_err(|source| SupervisorError::Store { source })?
+        {
+            Some(existing) => existing.resources,
+            None => self
+                .store
+                .halted_pair_resources(&request.grant, &request.plan)
+                .map_err(|source| SupervisorError::Store { source })?,
+        };
+        self.store
+            .abandon_halted_run(&HaltedRunAbandonmentRecord {
+                request: request.request,
+                run: request.run,
+                grant: request.grant,
+                plan: request.plan,
+                resources,
+                justification_evidence: request.justification_evidence,
+                authorized_by: authority.id.clone(),
+                authorized_at: jiff::Timestamp::now().to_string(),
+            })
+            .map_err(|source| SupervisorError::Store { source })
     }
 
     fn plan_steps(
@@ -888,6 +964,16 @@ impl Supervisor {
             .map_err(|source| SupervisorError::Store { source })?;
         if run.agent != agent.id {
             return Err(SupervisorError::GrantPrincipal);
+        }
+        if self
+            .store
+            .halted_run_abandonment(&run.id)
+            .map_err(|source| SupervisorError::Store { source })?
+            .is_some()
+        {
+            return Err(SupervisorError::OutOfBounds {
+                reason: "plan run was closed by a halted-run abandonment".to_owned(),
+            });
         }
         for (index, (attempt_id, request_id)) in run.steps.iter().enumerate() {
             match self.attempt(attempt_id)? {

@@ -13,9 +13,9 @@ use snafu::Snafu;
 
 use crate::domain::{
     AttemptId, AttemptRecord, AttemptState, Budget, CaseFact, CaseId, CaseRecord,
-    CommissionedProfile, EffectPermission, Grant, GrantId, OperationReceipt, PhysicalResource,
-    PlanId, PlanProposal, PlanRun, PrincipalId, ReconciliationRecord, ReconciliationState,
-    RecoveryTakeoverRecord, RequestId, ReviewedPlan,
+    CommissionedProfile, EffectPermission, Grant, GrantId, HaltedRunAbandonmentRecord,
+    OperationReceipt, PhysicalResource, PlanId, PlanProposal, PlanRun, PrincipalId,
+    ReconciliationRecord, ReconciliationState, RecoveryTakeoverRecord, RequestId, ReviewedPlan,
 };
 
 #[derive(Debug, Snafu)]
@@ -336,6 +336,162 @@ impl SqliteStore {
         self.load_entity("runs", id.as_str())
     }
 
+    /// Returns the durable abandonment record which permanently closes this
+    /// run, if an operator released its halted lease.
+    pub fn halted_run_abandonment(
+        &self,
+        run: &RequestId,
+    ) -> Result<Option<HaltedRunAbandonmentRecord>, StoreError> {
+        let connection = self.lock()?;
+        load_halted_run_abandonment_by_run(&connection, run)
+    }
+
+    /// Loads an abandonment by its immutable idempotency key.
+    pub fn halted_run_abandonment_request(
+        &self,
+        request: &RequestId,
+    ) -> Result<Option<HaltedRunAbandonmentRecord>, StoreError> {
+        let connection = self.lock()?;
+        load_halted_run_abandonment_by_request(&connection, request)
+    }
+
+    /// Tests whether this grant/plan authority pair was explicitly closed.
+    /// This is checked by admission as well as by the claim transaction.
+    pub fn is_halted_pair(&self, grant: &GrantId, plan: &PlanId) -> Result<bool, StoreError> {
+        let connection = self.lock()?;
+        halted_pair_exists(&connection, grant, plan)
+    }
+
+    /// Snapshot the currently held canonical lease keys for an abandonment
+    /// record. The write transaction compares this set again before release.
+    pub fn halted_pair_resources(
+        &self,
+        grant: &GrantId,
+        plan: &PlanId,
+    ) -> Result<std::collections::BTreeSet<String>, StoreError> {
+        let connection = self.lock()?;
+        lease_keys_for_pair(&connection, grant, plan)
+    }
+
+    /// Persist an operator-authorized abandonment and release only leases
+    /// which are still owned by the named grant/plan pair. Completed receipts
+    /// and spent grant budget remain immutable.
+    pub fn abandon_halted_run(
+        &self,
+        proposed: &HaltedRunAbandonmentRecord,
+    ) -> Result<HaltedRunAbandonmentRecord, StoreError> {
+        let mut connection = self.lock()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|source| StoreError::Sqlite { source })?;
+
+        if let Some(existing) =
+            load_halted_run_abandonment_by_request(&transaction, &proposed.request)?
+        {
+            if same_halted_run_abandonment(&existing, proposed) {
+                transaction
+                    .commit()
+                    .map_err(|source| StoreError::Sqlite { source })?;
+                return Ok(existing);
+            }
+            return Err(StoreError::Conflict {
+                kind: "halted run abandonment",
+                id: proposed.request.to_string(),
+            });
+        }
+        if let Some(existing) = load_halted_run_abandonment_by_run(&transaction, &proposed.run)? {
+            return Err(StoreError::Conflict {
+                kind: "halted run abandonment",
+                id: existing.run.to_string(),
+            });
+        }
+        if halted_pair_exists(&transaction, &proposed.grant, &proposed.plan)? {
+            return Err(StoreError::Conflict {
+                kind: "halted grant plan",
+                id: proposed.plan.to_string(),
+            });
+        }
+
+        let run: PlanRun = load_entity_from(&transaction, "runs", proposed.run.as_str())?
+            .ok_or_else(|| StoreError::Missing {
+                kind: "run",
+                id: proposed.run.to_string(),
+            })?;
+        if run.grant != proposed.grant || run.plan != proposed.plan {
+            return Err(StoreError::Conflict {
+                kind: "run",
+                id: proposed.run.to_string(),
+            });
+        }
+        let mut statement = transaction
+            .prepare("SELECT json FROM attempts WHERE grant_id = ?1 AND plan_id = ?2")
+            .map_err(|source| StoreError::Sqlite { source })?;
+        let attempts = statement
+            .query_map(
+                params![proposed.grant.as_str(), proposed.plan.as_str()],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|source| StoreError::Sqlite { source })?
+            .map(|row| {
+                row.map_err(|source| StoreError::Sqlite { source })
+                    .and_then(|json| decode::<AttemptRecord>(&json))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        drop(statement);
+        if attempts.is_empty() {
+            return Err(StoreError::Missing {
+                kind: "attempt for halted run",
+                id: proposed.run.to_string(),
+            });
+        }
+        for mut attempt in attempts {
+            match attempt.state {
+                AttemptState::Completed | AttemptState::Rejected => {}
+                // This is a proven pre-effect state. Record a durable rejected
+                // terminal before releasing the lease; no physical replay can
+                // later claim the private dispatch ticket.
+                AttemptState::Intent => {
+                    attempt.state = AttemptState::Rejected;
+                    attempt.receipt = Some(OperationReceipt::Rejected {
+                        reason: "operator abandoned halted run before dispatch".to_owned(),
+                    });
+                    attempt.updated_at = Timestamp::now().to_string();
+                    update_attempt(&transaction, &attempt)?;
+                }
+                AttemptState::Dispatched | AttemptState::Partial | AttemptState::Unknown => {
+                    return Err(StoreError::NotDispatchable {
+                        id: attempt.id.clone(),
+                    });
+                }
+            }
+        }
+        let resources = lease_keys_for_pair(&transaction, &proposed.grant, &proposed.plan)?;
+        if resources != proposed.resources {
+            return Err(StoreError::Conflict {
+                kind: "halted run resources",
+                id: proposed.run.to_string(),
+            });
+        }
+        for resource in &resources {
+            transaction
+                .execute(
+                    "DELETE FROM plan_leases WHERE resource_key = ?1 AND grant_id = ?2 AND plan_id = ?3",
+                    params![resource, proposed.grant.as_str(), proposed.plan.as_str()],
+                )
+                .map_err(|source| StoreError::Sqlite { source })?;
+        }
+        transaction
+            .execute(
+                "INSERT INTO halted_run_abandonments (request_id, run_id, grant_id, plan_id, json) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![proposed.request.as_str(), proposed.run.as_str(), proposed.grant.as_str(), proposed.plan.as_str(), encode(proposed)?],
+            )
+            .map_err(|source| StoreError::Sqlite { source })?;
+        transaction
+            .commit()
+            .map_err(|source| StoreError::Sqlite { source })?;
+        Ok(proposed.clone())
+    }
+
     pub fn advance_run(&self, id: &RequestId, cursor: usize) -> Result<(), StoreError> {
         let mut run = self.run(id)?.ok_or_else(|| StoreError::Missing {
             kind: "run",
@@ -447,6 +603,12 @@ impl SqliteStore {
                 .commit()
                 .map_err(|source| StoreError::Sqlite { source })?;
             return Ok(ReservationOutcome::Existing(existing));
+        }
+        if halted_pair_exists(&transaction, &proposed.grant, &proposed.plan)? {
+            return Err(StoreError::Conflict {
+                kind: "halted grant plan",
+                id: proposed.plan.to_string(),
+            });
         }
         let grant_json: String = transaction
             .query_row(
@@ -834,6 +996,9 @@ impl SqliteStore {
                 id: id.to_string(),
             })?;
         if attempt.state != AttemptState::Intent {
+            return Err(StoreError::NotDispatchable { id: id.clone() });
+        }
+        if halted_pair_exists(&transaction, &attempt.grant, &attempt.plan)? {
             return Err(StoreError::NotDispatchable { id: id.clone() });
         }
         let grant: Grant = load_entity_from(&transaction, "grants", attempt.grant.as_str())?
@@ -1347,6 +1512,7 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS reconciliations (request_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, ordinal INTEGER NOT NULL, state TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(attempt_id, ordinal));
              CREATE UNIQUE INDEX IF NOT EXISTS reconciliations_active_attempt ON reconciliations(attempt_id) WHERE state = 'claimed';
              CREATE TABLE IF NOT EXISTS recovery_takeovers (request_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS halted_run_abandonments (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, grant_id TEXT NOT NULL, plan_id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(grant_id, plan_id));
              CREATE TABLE IF NOT EXISTS plan_leases (resource_key TEXT PRIMARY KEY, grant_id TEXT NOT NULL, plan_id TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS case_facts (case_id TEXT NOT NULL, ordinal INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(case_id, ordinal));"
         ).map_err(|source| StoreError::Sqlite { source })?;
@@ -1575,6 +1741,68 @@ fn load_recovery_takeover(
     value.map(|json| decode(&json)).transpose()
 }
 
+fn load_halted_run_abandonment_by_request(
+    connection: &Connection,
+    request: &RequestId,
+) -> Result<Option<HaltedRunAbandonmentRecord>, StoreError> {
+    let value = connection
+        .query_row(
+            "SELECT json FROM halted_run_abandonments WHERE request_id = ?1",
+            [request.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })?;
+    value.map(|json| decode(&json)).transpose()
+}
+
+fn load_halted_run_abandonment_by_run(
+    connection: &Connection,
+    run: &RequestId,
+) -> Result<Option<HaltedRunAbandonmentRecord>, StoreError> {
+    let value = connection
+        .query_row(
+            "SELECT json FROM halted_run_abandonments WHERE run_id = ?1",
+            [run.as_str()],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })?;
+    value.map(|json| decode(&json)).transpose()
+}
+
+fn halted_pair_exists(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM halted_run_abandonments WHERE grant_id = ?1 AND plan_id = ?2",
+            params![grant.as_str(), plan.as_str()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })
+        .map(|value| value.is_some())
+}
+
+fn lease_keys_for_pair(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<std::collections::BTreeSet<String>, StoreError> {
+    connection
+        .prepare("SELECT resource_key FROM plan_leases WHERE grant_id = ?1 AND plan_id = ?2")
+        .map_err(|source| StoreError::Sqlite { source })?
+        .query_map(params![grant.as_str(), plan.as_str()], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|source| StoreError::Sqlite { source })?
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()
+        .map_err(|source| StoreError::Sqlite { source })
+}
+
 fn load_active_reconciliation(
     connection: &Connection,
     attempt: &AttemptId,
@@ -1636,6 +1864,19 @@ fn same_recovery_takeover(left: &RecoveryTakeoverRecord, right: &RecoveryTakeove
         && left.run == right.run
         && left.first_attempt == right.first_attempt
         && left.unresolved == right.unresolved
+        && left.grant == right.grant
+        && left.plan == right.plan
+        && left.resources == right.resources
+        && left.justification_evidence == right.justification_evidence
+        && left.authorized_by == right.authorized_by
+}
+
+fn same_halted_run_abandonment(
+    left: &HaltedRunAbandonmentRecord,
+    right: &HaltedRunAbandonmentRecord,
+) -> bool {
+    left.request == right.request
+        && left.run == right.run
         && left.grant == right.grant
         && left.plan == right.plan
         && left.resources == right.resources

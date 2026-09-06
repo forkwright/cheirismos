@@ -18,7 +18,8 @@ use crate::firmware::{
     inspect_image,
 };
 use crate::supervisor::{
-    Backend, PlanAdmissionRequest, PlanTicket, RecoveryTakeoverRequest, Supervisor, SupervisorError,
+    Backend, HaltedRunAbandonmentRequest, PlanAdmissionRequest, PlanTicket,
+    RecoveryTakeoverRequest, Supervisor, SupervisorError,
 };
 
 const MAX_EVIDENCE_FETCH_BYTES: usize = 1024 * 1024;
@@ -139,6 +140,10 @@ pub enum TransactionRequest {
     },
     /// Atomically transfer unresolved physical leases into a reviewed recovery run.
     RecoveryTakeover { recovery: RecoveryTakeoverRequest },
+    /// Operator-only durable release of a halted run that has no uncertain effect.
+    AbandonHaltedRun {
+        abandonment: HaltedRunAbandonmentRequest,
+    },
 }
 
 /// Operator-only profile and grant administration.
@@ -554,6 +559,11 @@ impl ServiceApi {
                     result: serde_json::json!({ "run": run, "recovery": true }),
                 })
             }
+            TransactionRequest::AbandonHaltedRun { abandonment } => self
+                .supervisor
+                .abandon_halted_run(principal, abandonment)
+                .map_err(|source| ApiError::Supervisor { source })
+                .and_then(|record| self.report_value(record)),
         }
     }
 

@@ -5,15 +5,16 @@ use cheirismos::conditions::{CheckTest, JsonPointer, LiveInterlock, ObservationC
 use cheirismos::domain::{
     ArtifactDigest, AttemptId, AttemptRecord, AttemptState, Budget, Capability,
     CommissionedProfile, EffectPermission, ElectricalLimits, EvidenceEnvelope, FixtureSessionId,
-    Grant, GrantId, InstrumentBinding, InstrumentId, Operation, PlanId, PlanRun, PlannedOperation,
-    Principal, PrincipalId, PrincipalRole, ProfileId, ReconciliationSetup, RegionLimits, RequestId,
-    ReviewedPlan, TargetId,
+    Grant, GrantId, InstrumentBinding, InstrumentId, Observation, Operation, OperationReceipt,
+    PlanId, PlanRun, PlannedOperation, Principal, PrincipalId, PrincipalRole, ProfileId,
+    ReconciliationSetup, RegionLimits, RequestId, ReviewedPlan, TargetId,
 };
 use cheirismos::evidence::{ArtifactStore, EvidenceSource};
 use cheirismos::store::{AdmissionSnapshot, SqliteStore};
 use cheirismos::supervisor::{
-    ArtifactResolver, Backend, BackendError, DispatchRequest, PlanAdmissionRequest,
-    ReconciliationRequest, RecoveryTakeoverRequest, Submission, SubmitRequest, Supervisor,
+    ArtifactResolver, Backend, BackendError, DispatchRequest, HaltedRunAbandonmentRequest,
+    PlanAdmissionRequest, ReconciliationRequest, RecoveryTakeoverRequest, Submission,
+    SubmitRequest, Supervisor,
 };
 
 fn id<T>(value: &'static str) -> Result<T, cheirismos::domain::DomainError>
@@ -1472,5 +1473,381 @@ fn plan_admission_derives_bounded_step_ids_for_maximum_run_id()
     let progress = supervisor.execute_next(&agent, ticket, &backend)?;
     assert_eq!(progress.attempt.state, AttemptState::Completed);
     assert!(progress.next.is_some());
+    Ok(())
+}
+
+#[test]
+fn operator_abandons_revoked_undispatched_intent_without_replaying_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+    let mut draft = plan("target-a")?;
+    draft.id = id("plan-halted-intent")?;
+    let proposal =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(draft))?;
+    supervisor.review_proposal(&reviewer, &proposal.id, &proposal.digest()?)?;
+    let backend = CountingBackend {
+        calls: Mutex::new(0),
+        store: artifacts.clone(),
+    };
+    let _ticket = supervisor.admit_plan(
+        &agent,
+        PlanAdmissionRequest {
+            run: id("run-halted-intent")?,
+            first_attempt: id("attempt-halted-intent")?,
+            grant: id("grant-a")?,
+            plan: id("plan-halted-intent")?,
+        },
+        &backend,
+    )?;
+    supervisor.revoke_grant(&operator, &id("grant-a")?)?;
+    assert!(
+        store
+            .claim_dispatch(&id("attempt-halted-intent")?, &agent.id)
+            .is_err()
+    );
+    assert_eq!(backend.calls()?, 0);
+    let justification = artifacts.publish(
+        b"halted before dispatch",
+        EvidenceSource::Attempt(id("attempt-halted-intent-justification")?),
+    )?;
+    let request = HaltedRunAbandonmentRequest {
+        request: id("request-abandon-intent")?,
+        run: id("run-halted-intent")?,
+        grant: id("grant-a")?,
+        plan: id("plan-halted-intent")?,
+        justification_evidence: justification.clone(),
+    };
+    let abandonment = supervisor.abandon_halted_run(&operator, request.clone())?;
+    assert!(!abandonment.resources.is_empty());
+    assert_eq!(
+        supervisor
+            .attempt(&id("attempt-halted-intent")?)?
+            .ok_or("intent missing")?
+            .state,
+        AttemptState::Rejected
+    );
+    assert_eq!(
+        supervisor.abandon_halted_run(&operator, request.clone())?,
+        abandonment
+    );
+    let mut conflicting = request.clone();
+    conflicting.justification_evidence = artifacts.publish(
+        b"different justification",
+        EvidenceSource::Attempt(id("attempt-halted-intent-conflict")?),
+    )?;
+    assert!(
+        supervisor
+            .abandon_halted_run(&operator, conflicting)
+            .is_err()
+    );
+    assert!(supervisor.resume_plan(&agent, &request.run).is_err());
+    assert!(
+        supervisor
+            .admit_plan(
+                &agent,
+                PlanAdmissionRequest {
+                    run: id("run-halted-intent-retry")?,
+                    first_attempt: id("attempt-halted-intent-retry")?,
+                    grant: id("grant-a")?,
+                    plan: id("plan-halted-intent")?,
+                },
+                &backend,
+            )
+            .is_err()
+    );
+    assert!(
+        store
+            .claim_dispatch(&id("attempt-halted-intent")?, &agent.id)
+            .is_err()
+    );
+    assert_eq!(backend.calls()?, 0);
+
+    let mut successor_grant = grant()?;
+    successor_grant.id = id("grant-after-halt")?;
+    successor_grant.remaining = Budget::try_new(10, 1_000, 10_000)?;
+    supervisor.issue_grant(&operator, &agent, successor_grant)?;
+    let mut successor_draft = plan("target-a")?;
+    successor_draft.id = id("plan-after-halt")?;
+    let successor_proposal = supervisor.propose_plan(
+        &agent,
+        cheirismos::domain::PlanProposal::from(successor_draft),
+    )?;
+    supervisor.review_proposal(
+        &reviewer,
+        &successor_proposal.id,
+        &successor_proposal.digest()?,
+    )?;
+    assert!(
+        supervisor
+            .admit_plan(
+                &agent,
+                PlanAdmissionRequest {
+                    run: id("run-after-halt")?,
+                    first_attempt: id("attempt-after-halt")?,
+                    grant: id("grant-after-halt")?,
+                    plan: id("plan-after-halt")?,
+                },
+                &backend,
+            )
+            .is_ok()
+    );
+    assert!(
+        store
+            .halted_run_abandonment(&id("run-halted-intent")?)?
+            .is_some()
+    );
+    Ok(())
+}
+
+#[test]
+fn operator_abandons_expired_undispatched_intent() -> Result<(), Box<dyn std::error::Error>> {
+    let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+    let mut expiring_grant = grant()?;
+    expiring_grant.id = id("grant-halted-expired")?;
+    expiring_grant.expires_at = jiff::Timestamp::now()
+        .saturating_add(jiff::Span::new().seconds(1))
+        .map_err(|error| format!("expiration: {error}"))?
+        .to_string();
+    supervisor.issue_grant(&operator, &agent, expiring_grant)?;
+    let mut draft = plan("target-a")?;
+    draft.id = id("plan-halted-expired")?;
+    let proposal =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(draft))?;
+    supervisor.review_proposal(&reviewer, &proposal.id, &proposal.digest()?)?;
+    let backend = CountingBackend {
+        calls: Mutex::new(0),
+        store: artifacts.clone(),
+    };
+    supervisor.admit_plan(
+        &agent,
+        PlanAdmissionRequest {
+            run: id("run-halted-expired")?,
+            first_attempt: id("attempt-halted-expired")?,
+            grant: id("grant-halted-expired")?,
+            plan: id("plan-halted-expired")?,
+        },
+        &backend,
+    )?;
+    std::thread::sleep(std::time::Duration::from_millis(1_100));
+    assert!(
+        store
+            .claim_dispatch(&id("attempt-halted-expired")?, &agent.id)
+            .is_err()
+    );
+    let justification = artifacts.publish(
+        b"grant expired before dispatch",
+        EvidenceSource::Attempt(id("attempt-halted-expired-justification")?),
+    )?;
+    supervisor.abandon_halted_run(
+        &operator,
+        HaltedRunAbandonmentRequest {
+            request: id("request-abandon-expired")?,
+            run: id("run-halted-expired")?,
+            grant: id("grant-halted-expired")?,
+            plan: id("plan-halted-expired")?,
+            justification_evidence: justification,
+        },
+    )?;
+    assert_eq!(
+        supervisor
+            .attempt(&id("attempt-halted-expired")?)?
+            .ok_or("expired intent missing")?
+            .state,
+        AttemptState::Rejected
+    );
+    assert_eq!(backend.calls()?, 0);
+    Ok(())
+}
+
+#[test]
+fn abandonment_refuses_unresolved_or_inflight_attempts() -> Result<(), Box<dyn std::error::Error>> {
+    let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+    let mut draft = plan("target-a")?;
+    draft.id = id("plan-abandon-inflight")?;
+    let proposal =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(draft))?;
+    supervisor.review_proposal(&reviewer, &proposal.id, &proposal.digest()?)?;
+    let backend = CountingBackend {
+        calls: Mutex::new(0),
+        store: artifacts.clone(),
+    };
+    let _ticket = supervisor.admit_plan(
+        &agent,
+        PlanAdmissionRequest {
+            run: id("run-abandon-inflight")?,
+            first_attempt: id("attempt-abandon-inflight")?,
+            grant: id("grant-a")?,
+            plan: id("plan-abandon-inflight")?,
+        },
+        &backend,
+    )?;
+    store.claim_dispatch(&id("attempt-abandon-inflight")?, &agent.id)?;
+    let justification = artifacts.publish(
+        b"must not release active work",
+        EvidenceSource::Attempt(id("attempt-abandon-inflight-justification")?),
+    )?;
+    let request = HaltedRunAbandonmentRequest {
+        request: id("request-abandon-inflight")?,
+        run: id("run-abandon-inflight")?,
+        grant: id("grant-a")?,
+        plan: id("plan-abandon-inflight")?,
+        justification_evidence: justification,
+    };
+    assert!(
+        supervisor
+            .abandon_halted_run(&agent, request.clone())
+            .is_err()
+    );
+    assert!(supervisor.abandon_halted_run(&operator, request).is_err());
+    assert_eq!(
+        supervisor
+            .attempt(&id("attempt-abandon-inflight")?)?
+            .ok_or("attempt missing")?
+            .state,
+        AttemptState::Dispatched
+    );
+    Ok(())
+}
+
+#[test]
+fn completed_prefix_halt_survives_reopen_then_releases_only_its_lease()
+-> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let database = directory.path().join("halted.sqlite");
+    let profile_value = profile()?;
+    let grant_value = grant()?;
+    let mut plan_value = plan("target-a")?;
+    plan_value.id = id("plan-halted-reopen")?;
+    plan_value.operations.push(plan_value.operations[0].clone());
+    plan_value.review_digest = plan_value.digest()?;
+    let run: RequestId = id("run-halted-reopen")?;
+    let first: AttemptId = id("attempt-halted-reopen")?;
+    let store = SqliteStore::open(&database)?;
+    store.save_profile(&profile_value)?;
+    store.save_grant(&grant_value)?;
+    store.save_plan(&plan_value)?;
+    store.create_run(&PlanRun {
+        id: run.clone(),
+        agent: id("agent-a")?,
+        grant: grant_value.id.clone(),
+        plan: plan_value.id.clone(),
+        steps: vec![
+            (first.clone(), id("request-halted-reopen")?),
+            (
+                id("attempt-halted-reopen-next")?,
+                id("request-halted-reopen-next")?,
+            ),
+        ],
+        cursor: 0,
+    })?;
+    let attempt = AttemptRecord {
+        id: first.clone(),
+        request: id("request-halted-reopen")?,
+        grant: grant_value.id.clone(),
+        plan: plan_value.id.clone(),
+        operation_index: 0,
+        plan_digest: plan_value.digest()?,
+        reserved: Budget::try_new(4, 4, 400)?,
+        profile: profile_value.id.clone(),
+        profile_digest: profile_value.digest()?,
+        leased_resources: profile_value.physical_resources(),
+        evidence_challenge: digest(b"halted-reopen-challenge"),
+        evidence_ordinal: 0,
+        state: AttemptState::Intent,
+        receipt: None,
+        created_at: "2099-01-01T00:00:00Z".to_owned(),
+        updated_at: "2099-01-01T00:00:00Z".to_owned(),
+    };
+    store.reserve(
+        &attempt,
+        &AdmissionSnapshot {
+            agent: id("agent-a")?,
+            profile: profile_value.clone(),
+            plan: plan_value.clone(),
+        },
+    )?;
+    store.claim_dispatch(&first, &id("agent-a")?)?;
+    store.record_receipt(
+        &first,
+        OperationReceipt::Completed {
+            observation: Observation {
+                captured_at: "2099-01-01T00:00:00Z".to_owned(),
+                source_fingerprint: digest(b"instrument"),
+                body: serde_json::json!({"completed": true}),
+                evidence: None,
+            },
+        },
+        false,
+    )?;
+    drop(store);
+
+    let reopened = Arc::new(SqliteStore::open(&database)?);
+    assert_eq!(reopened.repair_run_cursor(&run)?.cursor, 1);
+    // The next durable step cannot be admitted after this authority change,
+    // leaving the completed prefix holding its plan-wide lease across restart.
+    reopened.revoke_grant(&grant_value.id)?;
+    let artifacts = Arc::new(ArtifactStore::open(directory.path().join("artifacts"))?);
+    let justification = artifacts.publish(
+        b"halted after completed prefix",
+        EvidenceSource::Attempt(id("attempt-halted-reopen-justification")?),
+    )?;
+    let supervisor = Supervisor::new(reopened.clone(), artifacts);
+    let operator = principal("operator-a", PrincipalRole::Operator)?;
+    let agent = principal("agent-a", PrincipalRole::Agent)?;
+    assert!(supervisor.resume_plan(&agent, &run).is_err());
+    let abandonment = supervisor.abandon_halted_run(
+        &operator,
+        HaltedRunAbandonmentRequest {
+            request: id("request-abandon-reopen")?,
+            run: run.clone(),
+            grant: grant_value.id.clone(),
+            plan: plan_value.id.clone(),
+            justification_evidence: justification,
+        },
+    )?;
+    assert!(!abandonment.resources.is_empty());
+    assert_eq!(
+        reopened
+            .attempt(&first)?
+            .ok_or("completed attempt missing")?
+            .state,
+        AttemptState::Completed
+    );
+    let mut successor_grant = grant()?;
+    successor_grant.id = id("grant-halted-reopen-successor")?;
+    reopened.save_grant(&successor_grant)?;
+    let mut successor_plan = plan("target-a")?;
+    successor_plan.id = id("plan-halted-reopen-successor")?;
+    successor_plan.review_digest = successor_plan.digest()?;
+    reopened.save_plan(&successor_plan)?;
+    let successor = AttemptRecord {
+        id: id("attempt-halted-reopen-successor")?,
+        request: id("request-halted-reopen-successor")?,
+        grant: successor_grant.id.clone(),
+        plan: successor_plan.id.clone(),
+        operation_index: 0,
+        plan_digest: successor_plan.digest()?,
+        reserved: Budget::try_new(2, 2, 200)?,
+        profile: profile_value.id.clone(),
+        profile_digest: profile_value.digest()?,
+        leased_resources: profile_value.physical_resources(),
+        evidence_challenge: digest(b"halted-reopen-successor-challenge"),
+        evidence_ordinal: 0,
+        state: AttemptState::Intent,
+        receipt: None,
+        created_at: "2099-01-01T00:00:00Z".to_owned(),
+        updated_at: "2099-01-01T00:00:00Z".to_owned(),
+    };
+    assert!(matches!(
+        reopened.reserve(
+            &successor,
+            &AdmissionSnapshot {
+                agent: id("agent-a")?,
+                profile: profile_value,
+                plan: successor_plan,
+            },
+        )?,
+        cheirismos::store::ReservationOutcome::Reserved(_)
+    ));
     Ok(())
 }

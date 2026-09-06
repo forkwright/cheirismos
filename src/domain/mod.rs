@@ -894,6 +894,24 @@ pub struct RecoveryTakeoverRecord {
     pub authorized_at: String,
 }
 
+/// An operator-authorized closure of a halted run which has not left an
+/// uncertain physical effect.  This records why its held resources were
+/// released; it never changes the receipts or reservations of the old run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HaltedRunAbandonmentRecord {
+    pub request: RequestId,
+    pub run: RequestId,
+    pub grant: GrantId,
+    pub plan: PlanId,
+    /// Canonical lease keys captured in the same transaction that releases
+    /// them.  They are deliberately persisted rather than inferred later.
+    pub resources: BTreeSet<String>,
+    pub justification_evidence: ArtifactDigest,
+    pub authorized_by: PrincipalId,
+    pub authorized_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
