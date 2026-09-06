@@ -164,8 +164,19 @@ supervisor records the decision, rejects remaining undispatched intents, closes
 that authority pair permanently, and releases its owned resources atomically.
 It preserves completed receipts and consumed budgets. An in-flight, partial, or
 unknown effect prevents abandonment and still requires fresh reconciliation or
-a separately reviewed recovery takeover. Generate the request shape with
-`cheirismos schema`.
+a separately reviewed recovery takeover.
+
+A recovery run also holds the uncertainty inherited from its source. It cannot
+be abandoned, and a rejection before its first effect does not free those
+resources. An operator may transfer that responsibility to another separately
+reviewed recovery plan. The takeover request's `unresolved` attempts may identify
+an undispatched, rejected, or completed-prefix attempt only when it belongs to
+a recorded recovery destination that still owns the exact resource leases.
+No attempt or reconciliation in the source grant and plan may be in flight.
+The transaction transfers the leases and permanently retires the source
+authority; the source can never resume or reacquire them. Original receipts and
+consumed budgets remain intact throughout the chain. Generate the request
+shape with `cheirismos schema`.
 
 ## Credential rotation
 

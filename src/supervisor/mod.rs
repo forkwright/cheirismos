@@ -486,7 +486,7 @@ impl Supervisor {
                 .map_err(|source| SupervisorError::Store { source })?
         {
             return Err(SupervisorError::OutOfBounds {
-                reason: "plan authority was closed by a halted-run abandonment".to_owned(),
+                reason: "plan authority was closed by abandonment or recovery takeover".to_owned(),
             });
         }
         let profile =
@@ -980,7 +980,7 @@ impl Supervisor {
                 .map_err(|source| SupervisorError::Store { source })?
         {
             return Err(SupervisorError::OutOfBounds {
-                reason: "plan run was closed by a halted-run abandonment".to_owned(),
+                reason: "plan run was closed by abandonment or recovery takeover".to_owned(),
             });
         }
         for (index, (attempt_id, request_id)) in run.steps.iter().enumerate() {

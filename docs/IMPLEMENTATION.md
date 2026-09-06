@@ -22,6 +22,12 @@ transaction before physical I/O. Immutable artifacts are synchronized before
 database references are committed. Recovery of an unresolved intent requires
 fresh device evidence; duplicate requests never redispatch a physical attempt.
 
+Halting before an effect can release resources only through an operator's
+durable abandonment decision when no unresolved effect exists. Recovery
+takeovers retain inherited uncertainty even when a successor is rejected
+before dispatch. A further reviewed takeover transfers that responsibility and
+atomically retires the prior authority, preserving its receipts and budgets.
+
 ## Runtime ownership
 
 The daemon owns service configuration, role-bound local credentials, the Unix
