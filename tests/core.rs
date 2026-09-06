@@ -1223,6 +1223,367 @@ fn authority_takeover_transfers_lease_without_rewriting_uncertainty()
 }
 
 #[test]
+fn inherited_recovery_lease_requires_a_reviewed_takeover_chain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+    let source = match supervisor.submit(
+        &agent,
+        SubmitRequest {
+            attempt: id("attempt-chain-a")?,
+            request: id("request-chain-a")?,
+            grant: id("grant-a")?,
+            plan: id("plan-a")?,
+            operation_index: 0,
+        },
+    )? {
+        Submission::Admitted(ticket) => ticket,
+        Submission::Existing(_) => return Err("existing source".into()),
+    };
+    let unknown = supervisor.execute(
+        &agent,
+        source,
+        &PartialBackend {
+            store: artifacts.clone(),
+        },
+    )?;
+
+    let mut grant_b = grant()?;
+    grant_b.id = id("grant-chain-b")?;
+    grant_b.remaining = Budget::try_new(4, 100, 1_000)?;
+    supervisor.issue_grant(&operator, &agent, grant_b)?;
+    let mut plan_b = plan("target-a")?;
+    plan_b.id = id("plan-chain-b")?;
+    plan_b.operations.push(plan_b.operations[0].clone());
+    let proposal_b =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(plan_b))?;
+    supervisor.review_proposal(&reviewer, &proposal_b.id, &proposal_b.digest()?)?;
+    let justification_a = artifacts.publish(
+        b"chain handoff A to B",
+        EvidenceSource::Attempt(id("attempt-chain-justification-a")?),
+    )?;
+    let recovery_b = RecoveryTakeoverRequest {
+        request: id("request-chain-b")?,
+        run: id("run-chain-b")?,
+        first_attempt: id("attempt-chain-b")?,
+        unresolved: vec![unknown.id.clone()],
+        grant: id("grant-chain-b")?,
+        plan: id("plan-chain-b")?,
+        justification_evidence: justification_a,
+    };
+    let ticket_b = supervisor.takeover_recovery(
+        &operator,
+        recovery_b.clone(),
+        &CountingBackend {
+            calls: Mutex::new(0),
+            store: artifacts.clone(),
+        },
+    )?;
+    let abandon_justification = artifacts.publish(
+        b"recovery destination must not be abandoned",
+        EvidenceSource::Attempt(id("attempt-chain-abandonment")?),
+    )?;
+    assert!(
+        supervisor
+            .abandon_halted_run(
+                &operator,
+                HaltedRunAbandonmentRequest {
+                    request: id("request-chain-abandonment")?,
+                    run: id("run-chain-b")?,
+                    grant: id("grant-chain-b")?,
+                    plan: id("plan-chain-b")?,
+                    justification_evidence: abandon_justification,
+                },
+            )
+            .is_err()
+    );
+    let b_backend = CountingBackend {
+        calls: Mutex::new(0),
+        store: artifacts.clone(),
+    };
+    let b_progress = supervisor.execute_next(&agent, ticket_b, &b_backend)?;
+    assert_eq!(b_progress.attempt.state, AttemptState::Completed);
+    let second_b = store
+        .run(&id("run-chain-b")?)?
+        .ok_or("recovery run missing")?
+        .steps
+        .get(1)
+        .ok_or("recovery second step missing")?
+        .0
+        .clone();
+    store.reject_intent(&second_b, "pre-effect rejection".to_owned())?;
+
+    let mut grant_c = grant()?;
+    grant_c.id = id("grant-chain-c")?;
+    grant_c.remaining = Budget::try_new(2, 100, 1_000)?;
+    supervisor.issue_grant(&operator, &agent, grant_c)?;
+    let mut plan_c = plan("target-a")?;
+    plan_c.id = id("plan-chain-c")?;
+    let proposal_c =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(plan_c))?;
+    supervisor.review_proposal(&reviewer, &proposal_c.id, &proposal_c.digest()?)?;
+    assert!(
+        supervisor
+            .submit(
+                &agent,
+                SubmitRequest {
+                    attempt: id("attempt-chain-unrelated")?,
+                    request: id("request-chain-unrelated")?,
+                    grant: id("grant-chain-c")?,
+                    plan: id("plan-chain-c")?,
+                    operation_index: 0,
+                },
+            )
+            .is_err()
+    );
+    let justification_b = artifacts.publish(
+        b"chain handoff B to C",
+        EvidenceSource::Attempt(id("attempt-chain-justification-b")?),
+    )?;
+    let ticket_c = supervisor.takeover_recovery(
+        &operator,
+        RecoveryTakeoverRequest {
+            request: id("request-chain-c")?,
+            run: id("run-chain-c")?,
+            first_attempt: id("attempt-chain-c")?,
+            unresolved: vec![second_b],
+            grant: id("grant-chain-c")?,
+            plan: id("plan-chain-c")?,
+            justification_evidence: justification_b,
+        },
+        &CountingBackend {
+            calls: Mutex::new(0),
+            store: artifacts.clone(),
+        },
+    )?;
+    assert!(store.is_recovery_source_retired(&id("grant-a")?, &id("plan-a")?)?);
+    assert!(store.is_recovery_source_retired(&id("grant-chain-b")?, &id("plan-chain-b")?)?);
+    let backend = CountingBackend {
+        calls: Mutex::new(0),
+        store: artifacts,
+    };
+    assert_eq!(
+        supervisor
+            .execute_next(&agent, ticket_c, &backend)?
+            .attempt
+            .state,
+        AttemptState::Completed
+    );
+    assert!(
+        supervisor
+            .submit(
+                &agent,
+                SubmitRequest {
+                    attempt: id("attempt-chain-a-revive")?,
+                    request: id("request-chain-a-revive")?,
+                    grant: id("grant-a")?,
+                    plan: id("plan-a")?,
+                    operation_index: 0,
+                },
+            )
+            .is_err()
+    );
+    assert!(
+        supervisor
+            .submit(
+                &agent,
+                SubmitRequest {
+                    attempt: id("attempt-chain-b-revive")?,
+                    request: id("request-chain-b-revive")?,
+                    grant: id("grant-chain-b")?,
+                    plan: id("plan-chain-b")?,
+                    operation_index: 0,
+                },
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_takeover_refuses_pair_with_another_active_reconciliation()
+-> Result<(), Box<dyn std::error::Error>> {
+    let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+    let source = match supervisor.submit(
+        &agent,
+        SubmitRequest {
+            attempt: id("attempt-pair-active-a")?,
+            request: id("request-pair-active-a")?,
+            grant: id("grant-a")?,
+            plan: id("plan-a")?,
+            operation_index: 0,
+        },
+    )? {
+        Submission::Admitted(ticket) => ticket,
+        Submission::Existing(_) => return Err("existing source".into()),
+    };
+    let source = supervisor.execute(
+        &agent,
+        source,
+        &PartialBackend {
+            store: artifacts.clone(),
+        },
+    )?;
+    let mut grant_b = grant()?;
+    grant_b.id = id("grant-pair-active-b")?;
+    grant_b.remaining = Budget::try_new(4, 100, 1_000)?;
+    supervisor.issue_grant(&operator, &agent, grant_b)?;
+    let mut plan_b = plan("target-a")?;
+    plan_b.id = id("plan-pair-active-b")?;
+    plan_b.operations.push(plan_b.operations[0].clone());
+    let proposal_b =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(plan_b))?;
+    supervisor.review_proposal(&reviewer, &proposal_b.id, &proposal_b.digest()?)?;
+    let ticket_b = supervisor.takeover_recovery(
+        &operator,
+        RecoveryTakeoverRequest {
+            request: id("request-pair-active-b")?,
+            run: id("run-pair-active-b")?,
+            first_attempt: id("attempt-pair-active-b")?,
+            unresolved: vec![source.id],
+            grant: id("grant-pair-active-b")?,
+            plan: id("plan-pair-active-b")?,
+            justification_evidence: artifacts.publish(
+                b"pair active A to B",
+                EvidenceSource::Attempt(id("attempt-pair-active-justification-a")?),
+            )?,
+        },
+        &CountingBackend {
+            calls: Mutex::new(0),
+            store: artifacts.clone(),
+        },
+    )?;
+    let completed_prefix = supervisor.execute_next(
+        &agent,
+        ticket_b,
+        &CountingBackend {
+            calls: Mutex::new(0),
+            store: artifacts.clone(),
+        },
+    )?;
+    let second_b = store
+        .run(&id("run-pair-active-b")?)?
+        .ok_or("recovery run missing")?
+        .steps
+        .get(1)
+        .ok_or("second recovery step missing")?
+        .0
+        .clone();
+    store.claim_dispatch(&second_b, &agent.id)?;
+    store.record_receipt(
+        &second_b,
+        OperationReceipt::Partial {
+            observation: Observation {
+                captured_at: "2099-01-01T00:00:00Z".to_owned(),
+                source_fingerprint: digest(b"instrument"),
+                body: serde_json::json!({"partial": true}),
+                evidence: None,
+            },
+            reason: "requires reconciliation".to_owned(),
+        },
+        false,
+    )?;
+    let reconciliation: RequestId = id("request-pair-active-reconciliation")?;
+    assert!(matches!(
+        store.claim_reconciliation(&second_b, &reconciliation, &agent.id, None)?,
+        cheirismos::store::ReconciliationClaim::Claimed(_)
+    ));
+    let mut grant_c = grant()?;
+    grant_c.id = id("grant-pair-active-c")?;
+    grant_c.remaining = Budget::try_new(2, 100, 1_000)?;
+    supervisor.issue_grant(&operator, &agent, grant_c)?;
+    let mut plan_c = plan("target-a")?;
+    plan_c.id = id("plan-pair-active-c")?;
+    let proposal_c =
+        supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(plan_c))?;
+    supervisor.review_proposal(&reviewer, &proposal_c.id, &proposal_c.digest()?)?;
+    assert!(
+        supervisor
+            .takeover_recovery(
+                &operator,
+                RecoveryTakeoverRequest {
+                    request: id("request-pair-active-c")?,
+                    run: id("run-pair-active-c")?,
+                    first_attempt: id("attempt-pair-active-c")?,
+                    unresolved: vec![completed_prefix.attempt.id],
+                    grant: id("grant-pair-active-c")?,
+                    plan: id("plan-pair-active-c")?,
+                    justification_evidence: artifacts.publish(
+                        b"pair active B to C",
+                        EvidenceSource::Attempt(id("attempt-pair-active-justification-b")?),
+                    )?,
+                },
+                &CountingBackend {
+                    calls: Mutex::new(0),
+                    store: artifacts,
+                },
+            )
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn recovery_takeover_rejects_ordinary_or_dispatched_nonrecovery_sources()
+-> Result<(), Box<dyn std::error::Error>> {
+    for (suffix, dispatched) in [("intent", false), ("dispatched", true)] {
+        let (supervisor, store, artifacts, operator, agent, reviewer) = setup()?;
+        let source_attempt: AttemptId = format!("attempt-source-{suffix}").try_into()?;
+        let source_request: RequestId = format!("request-source-{suffix}").try_into()?;
+        let source = match supervisor.submit(
+            &agent,
+            SubmitRequest {
+                attempt: source_attempt.clone(),
+                request: source_request,
+                grant: id("grant-a")?,
+                plan: id("plan-a")?,
+                operation_index: 0,
+            },
+        )? {
+            Submission::Admitted(ticket) => ticket,
+            Submission::Existing(_) => return Err("existing source".into()),
+        };
+        if dispatched {
+            store.claim_dispatch(&source_attempt, &agent.id)?;
+        }
+        let mut replacement_grant = grant()?;
+        replacement_grant.id = format!("grant-source-{suffix}").try_into()?;
+        replacement_grant.remaining = Budget::try_new(2, 100, 1_000)?;
+        supervisor.issue_grant(&operator, &agent, replacement_grant)?;
+        let mut replacement = plan("target-a")?;
+        replacement.id = format!("plan-source-{suffix}").try_into()?;
+        let proposal =
+            supervisor.propose_plan(&agent, cheirismos::domain::PlanProposal::from(replacement))?;
+        supervisor.review_proposal(&reviewer, &proposal.id, &proposal.digest()?)?;
+        let justification = artifacts.publish(
+            suffix.as_bytes(),
+            EvidenceSource::Attempt(format!("attempt-source-justification-{suffix}").try_into()?),
+        )?;
+        assert!(
+            supervisor
+                .takeover_recovery(
+                    &operator,
+                    RecoveryTakeoverRequest {
+                        request: format!("request-source-takeover-{suffix}").try_into()?,
+                        run: format!("run-source-takeover-{suffix}").try_into()?,
+                        first_attempt: format!("attempt-source-takeover-{suffix}").try_into()?,
+                        unresolved: vec![source_attempt],
+                        grant: format!("grant-source-{suffix}").try_into()?,
+                        plan: format!("plan-source-{suffix}").try_into()?,
+                        justification_evidence: justification,
+                    },
+                    &CountingBackend {
+                        calls: Mutex::new(0),
+                        store: artifacts,
+                    },
+                )
+                .is_err()
+        );
+        let _ = source;
+    }
+    Ok(())
+}
+
+#[test]
 fn fresh_interlock_gates_effect_and_failed_postcondition_stays_partial()
 -> Result<(), Box<dyn std::error::Error>> {
     let (supervisor, _store, artifacts, _operator, agent, reviewer) = setup()?;

@@ -14,8 +14,8 @@ use snafu::Snafu;
 use crate::domain::{
     AttemptId, AttemptRecord, AttemptState, Budget, CaseFact, CaseId, CaseRecord,
     CommissionedProfile, EffectPermission, Grant, GrantId, HaltedRunAbandonmentRecord,
-    OperationReceipt, PhysicalResource, PlanId, PlanProposal, PlanRun, PrincipalId,
-    ReconciliationRecord, ReconciliationState, RecoveryTakeoverRecord, RequestId, ReviewedPlan,
+    OperationReceipt, PlanId, PlanProposal, PlanRun, PrincipalId, ReconciliationRecord,
+    ReconciliationState, RecoveryTakeoverRecord, RequestId, ReviewedPlan,
 };
 
 #[derive(Debug, Snafu)]
@@ -362,6 +362,17 @@ impl SqliteStore {
         halted_pair_exists(&connection, grant, plan)
     }
 
+    /// A retired source pair already transferred its lease into a successor
+    /// recovery run and can never resume, reserve, or dispatch again.
+    pub fn is_recovery_source_retired(
+        &self,
+        grant: &GrantId,
+        plan: &PlanId,
+    ) -> Result<bool, StoreError> {
+        let connection = self.lock()?;
+        recovery_source_retired(&connection, grant, plan)
+    }
+
     /// Snapshot the currently held canonical lease keys for an abandonment
     /// record. The write transaction compares this set again before release.
     pub fn halted_pair_resources(
@@ -408,6 +419,12 @@ impl SqliteStore {
         if halted_pair_exists(&transaction, &proposed.grant, &proposed.plan)? {
             return Err(StoreError::Conflict {
                 kind: "halted grant plan",
+                id: proposed.plan.to_string(),
+            });
+        }
+        if recovery_destination_exists(&transaction, &proposed.grant, &proposed.plan)? {
+            return Err(StoreError::Conflict {
+                kind: "recovery destination abandonment",
                 id: proposed.plan.to_string(),
             });
         }
@@ -610,6 +627,12 @@ impl SqliteStore {
                 id: proposed.plan.to_string(),
             });
         }
+        if recovery_source_retired(&transaction, &proposed.grant, &proposed.plan)? {
+            return Err(StoreError::Conflict {
+                kind: "retired recovery source",
+                id: proposed.plan.to_string(),
+            });
+        }
         let grant_json: String = transaction
             .query_row(
                 "SELECT json FROM grants WHERE id = ?1",
@@ -803,6 +826,14 @@ impl SqliteStore {
                 })
             };
         }
+        if halted_pair_exists(&transaction, &proposed.grant, &proposed.plan)?
+            || recovery_source_retired(&transaction, &proposed.grant, &proposed.plan)?
+        {
+            return Err(StoreError::Conflict {
+                kind: "closed recovery authority",
+                id: proposed.plan.to_string(),
+            });
+        }
         let mut grant: Grant = load_entity_from(&transaction, "grants", proposed.grant.as_str())?
             .ok_or_else(|| StoreError::Missing {
             kind: "grant",
@@ -877,7 +908,31 @@ impl SqliteStore {
                     kind: "unresolved attempt",
                     id: source_id.to_string(),
                 })?;
-            if !matches!(source.state, AttemptState::Partial | AttemptState::Unknown) {
+            let inherited_carrier =
+                recovery_destination_exists(&transaction, &source.grant, &source.plan)?;
+            if recovery_source_retired(&transaction, &source.grant, &source.plan)? {
+                return Err(StoreError::Conflict {
+                    kind: "retired recovery source",
+                    id: source.plan.to_string(),
+                });
+            }
+            if source_pair_has_dispatched(&transaction, &source.grant, &source.plan)? {
+                return Err(StoreError::NotDispatchable { id: source.id });
+            }
+            if source_pair_has_active_reconciliation(&transaction, &source.grant, &source.plan)? {
+                return Err(StoreError::Conflict {
+                    kind: "active reconciliation",
+                    id: source.plan.to_string(),
+                });
+            }
+            let ordinary_uncertainty =
+                matches!(source.state, AttemptState::Partial | AttemptState::Unknown);
+            let inherited_pre_effect = inherited_carrier
+                && matches!(
+                    source.state,
+                    AttemptState::Intent | AttemptState::Rejected | AttemptState::Completed
+                );
+            if !ordinary_uncertainty && !inherited_pre_effect {
                 return Err(StoreError::NotDispatchable { id: source.id });
             }
             if source.leased_resources != proposed.leased_resources {
@@ -917,6 +972,14 @@ impl SqliteStore {
                 "UPDATE plan_leases SET grant_id = ?2, plan_id = ?3 WHERE resource_key = ?1 AND grant_id = ?4 AND plan_id = ?5",
                 params![resource.key(), proposed.grant.as_str(), proposed.plan.as_str(), owner.0, owner.1],
             ).map_err(|source| StoreError::Sqlite { source })?;
+        }
+        for (source_grant, source_plan) in &old_owners {
+            transaction
+                .execute(
+                    "INSERT INTO recovery_source_retirements (grant_id, plan_id, takeover_request) VALUES (?1, ?2, ?3)",
+                    params![source_grant, source_plan, recovery.request.as_str()],
+                )
+                .map_err(|source| StoreError::Sqlite { source })?;
         }
         grant.remaining = grant
             .remaining
@@ -999,6 +1062,9 @@ impl SqliteStore {
             return Err(StoreError::NotDispatchable { id: id.clone() });
         }
         if halted_pair_exists(&transaction, &attempt.grant, &attempt.plan)? {
+            return Err(StoreError::NotDispatchable { id: id.clone() });
+        }
+        if recovery_source_retired(&transaction, &attempt.grant, &attempt.plan)? {
             return Err(StoreError::NotDispatchable { id: id.clone() });
         }
         let grant: Grant = load_entity_from(&transaction, "grants", attempt.grant.as_str())?
@@ -1122,7 +1188,10 @@ impl SqliteStore {
         attempt.receipt = Some(receipt);
         attempt.updated_at = Timestamp::now().to_string();
         update_attempt(&transaction, &attempt)?;
-        if release_lease {
+        if release_lease
+            && (!matches!(attempt.state, AttemptState::Rejected)
+                || !recovery_destination_exists(&transaction, &attempt.grant, &attempt.plan)?)
+        {
             release_leases(&transaction, &attempt)?;
         }
         transaction
@@ -1152,7 +1221,9 @@ impl SqliteStore {
         attempt.receipt = Some(OperationReceipt::Rejected { reason });
         attempt.updated_at = Timestamp::now().to_string();
         update_attempt(&transaction, &attempt)?;
-        release_leases(&transaction, &attempt)?;
+        if !recovery_destination_exists(&transaction, &attempt.grant, &attempt.plan)? {
+            release_leases(&transaction, &attempt)?;
+        }
         transaction
             .commit()
             .map_err(|source| StoreError::Sqlite { source })?;
@@ -1452,19 +1523,6 @@ impl SqliteStore {
             .collect()
     }
 
-    pub fn release_plan_lease(
-        &self,
-        resources: &std::collections::BTreeSet<PhysicalResource>,
-        grant: &GrantId,
-        plan: &PlanId,
-    ) -> Result<(), StoreError> {
-        let connection = self.lock()?;
-        for resource in resources {
-            connection.execute("DELETE FROM plan_leases WHERE resource_key = ?1 AND grant_id = ?2 AND plan_id = ?3", params![resource.key(), grant.as_str(), plan.as_str()]).map_err(|source| StoreError::Sqlite { source })?;
-        }
-        Ok(())
-    }
-
     pub fn integrity_check(&self) -> Result<(), StoreError> {
         let connection = self.lock()?;
         let result: String = connection
@@ -1512,6 +1570,7 @@ impl SqliteStore {
              CREATE TABLE IF NOT EXISTS reconciliations (request_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, ordinal INTEGER NOT NULL, state TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(attempt_id, ordinal));
              CREATE UNIQUE INDEX IF NOT EXISTS reconciliations_active_attempt ON reconciliations(attempt_id) WHERE state = 'claimed';
              CREATE TABLE IF NOT EXISTS recovery_takeovers (request_id TEXT PRIMARY KEY, json TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS recovery_source_retirements (grant_id TEXT NOT NULL, plan_id TEXT NOT NULL, takeover_request TEXT NOT NULL, PRIMARY KEY(grant_id, plan_id));
              CREATE TABLE IF NOT EXISTS halted_run_abandonments (request_id TEXT PRIMARY KEY, run_id TEXT NOT NULL UNIQUE, grant_id TEXT NOT NULL, plan_id TEXT NOT NULL, json TEXT NOT NULL, UNIQUE(grant_id, plan_id));
              CREATE TABLE IF NOT EXISTS plan_leases (resource_key TEXT PRIMARY KEY, grant_id TEXT NOT NULL, plan_id TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS case_facts (case_id TEXT NOT NULL, ordinal INTEGER NOT NULL, json TEXT NOT NULL, PRIMARY KEY(case_id, ordinal));"
@@ -1739,6 +1798,75 @@ fn load_recovery_takeover(
         .optional()
         .map_err(|source| StoreError::Sqlite { source })?;
     value.map(|json| decode(&json)).transpose()
+}
+
+fn recovery_destination_exists(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<bool, StoreError> {
+    let mut statement = connection
+        .prepare("SELECT json FROM recovery_takeovers")
+        .map_err(|source| StoreError::Sqlite { source })?;
+    let records = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|source| StoreError::Sqlite { source })?
+        .map(|row| {
+            row.map_err(|source| StoreError::Sqlite { source })
+                .and_then(|json| decode::<RecoveryTakeoverRecord>(&json))
+        })
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    Ok(records
+        .iter()
+        .any(|record| record.grant == *grant && record.plan == *plan))
+}
+
+fn recovery_source_retired(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM recovery_source_retirements WHERE grant_id = ?1 AND plan_id = ?2",
+            params![grant.as_str(), plan.as_str()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })
+        .map(|value| value.is_some())
+}
+
+fn source_pair_has_dispatched(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM attempts WHERE grant_id = ?1 AND plan_id = ?2 AND state = 'dispatched'",
+            params![grant.as_str(), plan.as_str()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })
+        .map(|value| value.is_some())
+}
+
+fn source_pair_has_active_reconciliation(
+    connection: &Connection,
+    grant: &GrantId,
+    plan: &PlanId,
+) -> Result<bool, StoreError> {
+    connection
+        .query_row(
+            "SELECT 1 FROM reconciliations AS r JOIN attempts AS a ON a.id = r.attempt_id WHERE a.grant_id = ?1 AND a.plan_id = ?2 AND r.state = 'claimed'",
+            params![grant.as_str(), plan.as_str()],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(|source| StoreError::Sqlite { source })
+        .map(|value| value.is_some())
 }
 
 fn load_halted_run_abandonment_by_request(

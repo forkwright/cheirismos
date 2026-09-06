@@ -480,6 +480,10 @@ impl Supervisor {
             .store
             .is_halted_pair(&request.grant, &request.plan)
             .map_err(|source| SupervisorError::Store { source })?
+            || self
+                .store
+                .is_recovery_source_retired(&request.grant, &request.plan)
+                .map_err(|source| SupervisorError::Store { source })?
         {
             return Err(SupervisorError::OutOfBounds {
                 reason: "plan authority was closed by a halted-run abandonment".to_owned(),
@@ -970,6 +974,10 @@ impl Supervisor {
             .halted_run_abandonment(&run.id)
             .map_err(|source| SupervisorError::Store { source })?
             .is_some()
+            || self
+                .store
+                .is_recovery_source_retired(&run.grant, &run.plan)
+                .map_err(|source| SupervisorError::Store { source })?
         {
             return Err(SupervisorError::OutOfBounds {
                 reason: "plan run was closed by a halted-run abandonment".to_owned(),
