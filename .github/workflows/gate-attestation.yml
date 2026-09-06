@@ -1,0 +1,84 @@
+# Canonical hybrid gate: a validated Gate-Passed trailer takes the attestation
+# path; every other PR and every main push runs the actual Rust gate below.
+name: gate
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# The reusable gate has its own canonical concurrency key. This caller key is
+# intentionally distinct so the nested workflow does not cancel itself.
+concurrency:
+  group: >-
+    cheirismos-caller-${{ github.workflow }}-${{
+      github.event_name == 'push' && github.sha || github.ref
+    }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    uses: forkwright/.github/.github/workflows/hybrid-gate.yml@5556cb9e05327f855ccc208080fb1924cf7e8264
+    with:
+      fmt_cmd: cargo fmt --all -- --check
+      check_cmd: cargo check --workspace --all-targets
+      clippy_cmd: cargo clippy --workspace --all-targets -- -D warnings
+      nextest_cmd: cargo nextest run --workspace
+      doctest_cmd: cargo test --workspace --doc
+      needs_fleet_repo_token: false
+      full_gate_timeout_minutes: 45
+      ai_attribution_check: true
+      docs_only_exemption: true
+
+
+  # Kanon is source-only and private, so it remains independent of the required
+  # hybrid gate.  A missing credential is a skipped job, never a successful
+  # claim that standards were checked; provisioning it makes this a real lint.
+  check-fleet-repo-token:
+    name: Check FLEET_REPO_TOKEN
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    outputs:
+      present: ${{ steps.check.outputs.present }}
+    steps:
+      - id: check
+        run: echo "present=${{ secrets.FLEET_REPO_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
+
+  kanon-lint:
+    name: kanon lint
+    needs: check-fleet-repo-token
+    if: needs.check-fleet-repo-token.outputs.present == 'true'
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cheirismos
+          persist-credentials: false
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: forkwright/kanon
+          ref: 7f0c5723e1064a66fa10dfd387c3d388f20f166f
+          path: kanon
+          token: ${{ secrets.FLEET_REPO_TOKEN }}
+          persist-credentials: false
+
+      - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
+        with:
+          cache: false
+
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          workspaces: kanon
+
+      - name: Install kanon
+        run: cargo install --path kanon/crates/pragma --bin kanon --no-default-features --locked
+
+      - name: Lint standards errors
+        working-directory: cheirismos
+        run: kanon lint . --summary --min-severity error

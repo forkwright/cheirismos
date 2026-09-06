@@ -1,0 +1,3 @@
+Co-Authored-By:.*(Claude|GPT|Codex|Kimi|Moonshot|Gemini|Anthropic|OpenAI)
+Generated with .*(Claude|Codex)
+claude\.com/claude-code

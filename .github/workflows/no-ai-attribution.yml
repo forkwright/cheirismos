@@ -1,0 +1,22 @@
+name: No AI Attribution
+
+on:
+  pull_request:
+    branches: [main]
+    # WHY `edited`: the PR BODY is squashed into the merge commit, and without this the check never
+    # re-runs after a body edit. A marker added by editing the description after the last push was
+    # scanned by nothing at all -- the same hole the title guard already closes by listing these
+    # four types.
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  no-ai-attribution:
+    uses: forkwright/.github/.github/workflows/no-ai-attribution.yml@5556cb9e05327f855ccc208080fb1924cf7e8264

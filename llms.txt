@@ -1,0 +1,10 @@
+# Cheirismos
+
+> Governed physical-device observation, experimentation, and manipulation for agents.
+
+## Agent entry points
+
+- [README.md](README.md)
+- [CLAUDE.md](CLAUDE.md)
+- [AGENTS.md](AGENTS.md)
+- [docs/](docs/)

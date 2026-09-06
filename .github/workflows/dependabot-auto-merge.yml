@@ -1,0 +1,16 @@
+name: Dependabot Auto-Merge
+
+on:
+  pull_request:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  dependabot-auto-merge:
+    uses: forkwright/.github/.github/workflows/dependabot-auto-merge.yml@5556cb9e05327f855ccc208080fb1924cf7e8264

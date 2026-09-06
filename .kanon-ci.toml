@@ -1,0 +1,53 @@
+# Forge CI consumes this ordered pipeline; the GitHub caller remains the
+# canonical hybrid Rust gate. Keeping the fleet standards lint here gives the
+# forge verifier the same structural check without a repository-local stub.
+[pipeline]
+stages = ["cargo fmt", "cargo check", "cargo clippy", "cargo nextest", "kanon lint"]
+
+[stages."cargo fmt"]
+cmd = "cargo fmt --all -- --check"
+timeout_secs = 300
+
+[stages."cargo check"]
+cmd = "cargo check --workspace --all-targets --jobs 4"
+timeout_secs = 900
+
+[stages."cargo clippy"]
+cmd = "cargo clippy --workspace --all-targets --jobs 4 -- -D warnings"
+timeout_secs = 900
+
+[stages."cargo nextest"]
+cmd = "cargo nextest run --workspace --build-jobs 4 --test-threads 4"
+timeout_secs = 1800
+
+[stages."kanon lint"]
+cmd = "kanon lint . --summary --min-severity error"
+timeout_secs = 600
+
+[ci]
+release_please = true
+crates_publish = false
+
+[ci.toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+
+[ci.security]
+has_private_deps = false
+run_osv = true
+cargo_audit_timeout_minutes = 15
+
+[ci.codeql]
+analyze_actions = true
+analyze_rust = true
+
+[ci.reusable]
+# Single revision for every generated first-party reusable caller.
+ref = "5556cb9e05327f855ccc208080fb1924cf7e8264"
+
+# The fleet substrate currently renders the retired trailer-only caller and a
+# generic deny allowlist. These explicit opt-outs retain canonical hybrid-gate
+# coverage and the exact public git dependencies until typed renderer support
+# lands; substrate-sync reports both as visible skipped artifacts.
+[ci.disable]
+files = [".github/workflows/gate-attestation.yml", "deny.toml"]

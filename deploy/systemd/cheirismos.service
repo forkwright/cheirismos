@@ -1,0 +1,67 @@
+[Unit]
+Description=Cheirismos governed physical-agent supervisor
+After=local-fs.target
+Wants=local-fs.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=exec
+User=cheirismos
+Group=cheirismos
+SupplementaryGroups=cheirismos-hardware cheirismos-clients
+UMask=0077
+WorkingDirectory=/var/lib/cheirismos
+ExecStart=/usr/local/bin/cheirismos serve /var/lib/cheirismos/service.json
+Restart=on-failure
+RestartSec=5s
+TimeoutStartSec=30s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+
+# A restart only starts the supervisor. Durable unresolved work is recovered as
+# unknown from its journal; this unit must never replay a physical operation.
+Environment=RUST_LOG=info
+Environment=RUST_BACKTRACE=1
+
+# No network listener belongs in the supervisor. Its local Unix socket is the
+# sole transport; instrument access is granted separately by exact device rules.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+PrivateTmp=yes
+PrivateMounts=yes
+PrivateDevices=no
+DevicePolicy=closed
+DeviceAllow=/dev/null rw
+DeviceAllow=/dev/urandom r
+ProtectSystem=strict
+ProtectHome=yes
+ProtectControlGroups=yes
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service @network-io
+SystemCallErrorNumber=EPERM
+ReadWritePaths=/var/lib/cheirismos
+StateDirectory=cheirismos
+StateDirectoryMode=0700
+RuntimeDirectory=cheirismos
+RuntimeDirectoryMode=0755
+LogsDirectory=cheirismos
+LogsDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

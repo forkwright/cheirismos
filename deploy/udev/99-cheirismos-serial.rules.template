@@ -1,0 +1,3 @@
+# Installed by deploy/install.sh with a reviewed exact hardware serial.
+# @DEVICE_LINK@ and @SERIAL@ are literal values, never vendor-wide matches.
+SUBSYSTEM=="tty", ENV{ID_SERIAL_SHORT}=="@SERIAL@", GROUP="cheirismos-hardware", MODE="0660", SYMLINK+="cheirismos/@DEVICE_LINK@", TAG+="systemd"

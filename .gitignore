@@ -1,0 +1,41 @@
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Rust
+/target/
+**/*.rs.bk
+instance/
+cheirismos-instance/
+*.db
+*.db-wal
+*.db-shm
+/dist/
+
+# Local fleet reference material
+/standards/
+
+# Private service state and credentials, at any instance location
+credentials/
+secrets/
+artifacts/
+runtime/
+service.json
+*.token
+*.sock
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+.env
+.env.*
+!.env.example

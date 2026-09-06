@@ -1,0 +1,66 @@
+[package]
+license = "LicenseRef-PolyForm-Noncommercial-1.0.0"
+name = "cheirismos"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+description = "Governed physical device observation, experimentation, and manipulation for agents"
+repository = "https://github.com/forkwright/cheirismos"
+authors = ["Ardent Works LLC"]
+
+[package.metadata.kanon]
+maturity = "alpha"
+since = "2026-09-06"
+exit-criteria = "Integrated recovery tests and qualification of one physical fixture"
+
+[workspace]
+members = ["."]
+resolver = "3"
+
+[dependencies]
+base64 = "0.22"
+bpio2 = { git = "https://github.com/DangerousPrototypes/BusPirate-BPIO2-flatbuffer-interface", rev = "eb898441a4ed2dd5019e511f2a374ff555f30309", package = "bpio2", default-features = false }
+clap = { version = "4", features = ["derive"] }
+epitelesis = { git = "https://github.com/forkwright/epitelesis.git", rev = "94d22be57d1eab04c09962729cb1d3ce47c59ade", version = "0.4.1" }
+flatbuffers = { version = "25.2.10", default-features = false }
+hex = "0.4"
+jiff = { version = "0.2", features = ["serde"] }
+koinon = { git = "https://github.com/forkwright/koinon", rev = "e7985b67c86279a2d5ea9a31b4b55101575cdd37", default-features = false, features = ["cli"] }
+rusqlite = { version = "0.37", features = ["bundled", "backup"] }
+rmcp = { version = "1.2", features = ["server", "transport-io"] }
+rustix = { version = "1", features = ["fs", "process"] }
+schemars = "1"
+secrecy = { version = "0.10", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+snafu = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "sync", "signal", "time"] }
+tokio-serial = { version = "5.5", default-features = false }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+rmcp = { version = "1.2", features = ["client", "transport-child-process"] }
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

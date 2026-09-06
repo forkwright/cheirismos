@@ -1,0 +1,52 @@
+# Documentation inventory for Cheirismos. See standards/DOC-MANIFEST.md.
+
+[[doc]]
+path = "docs/ARCHITECTURE.md"
+type = "authored"
+evergreen = true
+description = "Authority boundary, evidence flow, qualification, and public-data model."
+
+[[doc]]
+path = "docs/CHARTER.md"
+type = "authored"
+evergreen = true
+description = "Governed physical-agency purpose, authority, and non-negotiable rules."
+
+[[doc]]
+path = "docs/IMPLEMENTATION.md"
+type = "authored"
+evergreen = false
+description = "Current daemon, supervisor, persistence, and client implementation contracts."
+
+[[doc]]
+path = "docs/OPERATIONS.md"
+type = "operational"
+evergreen = false
+description = "Local service deployment, health, credential, backup, and restore runbook."
+last_tested = "2026-09-06"
+
+[[doc]]
+path = "docs/QUALIFICATION.md"
+type = "authored"
+evergreen = false
+description = "Bench evidence requirements and commissioning limits for supported instruments."
+
+[[doc]]
+path = "docs/RECOVERY.md"
+type = "authored"
+evergreen = true
+description = "Target-neutral governed recovery lifecycle and escalation boundary."
+
+[[doc]]
+path = "docs/decisions/naming.md"
+type = "decision-record"
+evergreen = true
+description = "Accepted project name and short-prefix decision."
+decided = "2026-09-06"
+
+[[doc]]
+path = "docs/decisions/prior-art.md"
+type = "decision-record"
+evergreen = true
+description = "Accepted prior-art reuse and dependency-boundary decisions."
+decided = "2026-09-06"

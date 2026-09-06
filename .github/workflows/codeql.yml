@@ -1,0 +1,26 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 14 * * 3"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  codeql:
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
+    uses: forkwright/.github/.github/workflows/codeql.yml@5556cb9e05327f855ccc208080fb1924cf7e8264
+    with:
+      analyze_actions: true
+      analyze_rust: true
+      rust_toolchain: "1.97.1"
