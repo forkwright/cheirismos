@@ -18,7 +18,7 @@ members = ["."]
 resolver = "3"
 
 [dependencies]
-base64 = "0.22"
+base64 = "0.23"
 bpio2 = { git = "https://github.com/DangerousPrototypes/BusPirate-BPIO2-flatbuffer-interface", rev = "eb898441a4ed2dd5019e511f2a374ff555f30309", package = "bpio2", default-features = false }
 clap = { version = "4", features = ["derive"] }
 epitelesis = { git = "https://github.com/forkwright/epitelesis.git", rev = "94d22be57d1eab04c09962729cb1d3ce47c59ade", version = "0.4.1" }
