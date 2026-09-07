@@ -112,7 +112,7 @@ impl InstrumentConfig {
     pub fn fingerprint(&self) -> Result<String, serde_json::Error> {
         let encoded = serde_json::to_vec(self)?;
         let digest = Sha256::digest(encoded);
-        Ok(format!("sha256:{digest:x}"))
+        Ok(format!("sha256:{}", hex::encode(digest)))
     }
 }
 
