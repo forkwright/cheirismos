@@ -2,8 +2,8 @@
 
 **Status:** accepted
 
-**Research refreshed:** 2026-09-07. Upstream facts and license identifiers in
-this record are source-pinned observations, not legal advice.
+**Research refreshed:** 2026-09-07. Upstream facts and license identifiers were
+checked against the linked primary sources on that date.
 
 Cheirismos reuses proven vocabulary and compatible interfaces where they fit,
 while retaining ownership of physical-device authority and qualification.
@@ -73,6 +73,6 @@ independent physical measurement.
 
 Agent-facing research manuals should retain an exact source version or hash and
 page/folio citations. They should use full-text search with on-demand page
-rendering through Stathmos, so a claim can be traced back to the displayed
+rendering following Stathmos's approach, so a claim can be traced back to the displayed
 source page. This is a documentation/evidence direction, not an authority
 mechanism or a current runtime requirement.
