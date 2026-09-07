@@ -13,6 +13,12 @@ evergreen = true
 description = "Governed physical-agency purpose, authority, and non-negotiable rules."
 
 [[doc]]
+path = "docs/CI.md"
+type = "operational"
+evergreen = true
+description = "Required public validation, scoped private standards access, and release review."
+
+[[doc]]
 path = "docs/IMPLEMENTATION.md"
 type = "authored"
 evergreen = false
