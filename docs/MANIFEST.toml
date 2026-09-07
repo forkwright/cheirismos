@@ -55,4 +55,4 @@ path = "docs/decisions/prior-art.md"
 type = "decision-record"
 evergreen = true
 description = "Accepted prior-art reuse and dependency-boundary decisions."
-decided = "2026-09-06"
+decided = "2026-09-07"
