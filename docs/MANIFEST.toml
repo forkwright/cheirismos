@@ -13,6 +13,12 @@ evergreen = true
 description = "Governed physical-agency purpose, authority, and non-negotiable rules."
 
 [[doc]]
+path = "docs/CI.md"
+type = "operational"
+evergreen = true
+description = "Required public validation, scoped private standards access, and release review."
+
+[[doc]]
 path = "docs/IMPLEMENTATION.md"
 type = "authored"
 evergreen = false
@@ -49,4 +55,4 @@ path = "docs/decisions/prior-art.md"
 type = "decision-record"
 evergreen = true
 description = "Accepted prior-art reuse and dependency-boundary decisions."
-decided = "2026-09-06"
+decided = "2026-09-07"

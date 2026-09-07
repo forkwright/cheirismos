@@ -65,6 +65,12 @@ pub enum StoreError {
 
     #[snafu(display("database integrity check failed: {message}"))]
     Integrity { message: String },
+
+    #[snafu(display("{field} exceeds SQLite's signed 64-bit range: {value}"))]
+    IntegerOutOfRange { field: &'static str, value: u64 },
+
+    #[snafu(display("stored {field} is negative: {value}"))]
+    NegativeStoredInteger { field: &'static str, value: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -711,13 +717,15 @@ impl SqliteStore {
         let existing_steps = transaction
             .prepare("SELECT operation_index, state FROM attempts WHERE grant_id = ?1 AND plan_id = ?2 ORDER BY operation_index ASC")
             .map_err(|source| StoreError::Sqlite { source })?
-            .query_map(params![proposed.grant.as_str(), proposed.plan.as_str()], |row| Ok((row.get::<_, usize>(0)?, row.get::<_, String>(1)?)))
+            .query_map(params![proposed.grant.as_str(), proposed.plan.as_str()], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
             .map_err(|source| StoreError::Sqlite { source })?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|source| StoreError::Sqlite { source })?;
         let expected = match existing_steps.last() {
             None => 0,
-            Some((index, state)) if state == "completed" => index + 1,
+            Some((index, state)) if state == "completed" => {
+                stored_index("attempt operation index", *index)? + 1
+            }
             Some(_) => return Err(StoreError::OutOfOrder),
         };
         if proposed.operation_index != expected {
@@ -770,7 +778,7 @@ impl SqliteStore {
             .map_err(|source| StoreError::Sqlite { source })?;
         transaction.execute(
             "INSERT INTO attempts (id, request_id, grant_id, plan_id, operation_index, state, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![proposed.id.as_str(), proposed.request.as_str(), proposed.grant.as_str(), proposed.plan.as_str(), proposed.operation_index as u64, state_text(proposed.state), encode(proposed)?],
+            params![proposed.id.as_str(), proposed.request.as_str(), proposed.grant.as_str(), proposed.plan.as_str(), sqlite_index("attempt operation index", proposed.operation_index)?, state_text(proposed.state), encode(proposed)?],
         ).map_err(|source| StoreError::Sqlite { source })?;
         transaction
             .commit()
@@ -994,7 +1002,7 @@ impl SqliteStore {
             )
             .map_err(|source| StoreError::Sqlite { source })?;
         transaction.execute("INSERT INTO attempts (id, request_id, grant_id, plan_id, operation_index, state, json) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![proposed.id.as_str(), proposed.request.as_str(), proposed.grant.as_str(), proposed.plan.as_str(), 0_u64, state_text(proposed.state), encode(proposed)?])
+            params![proposed.id.as_str(), proposed.request.as_str(), proposed.grant.as_str(), proposed.plan.as_str(), 0_i64, state_text(proposed.state), encode(proposed)?])
             .map_err(|source| StoreError::Sqlite { source })?;
         transaction
             .execute(
@@ -1035,7 +1043,7 @@ impl SqliteStore {
         connection
             .query_row(
                 "SELECT json FROM attempts WHERE grant_id = ?1 AND plan_id = ?2 AND operation_index = ?3",
-                params![grant.as_str(), plan.as_str(), index as u64],
+                params![grant.as_str(), plan.as_str(), sqlite_index("attempt operation index", index)?],
                 |row| row.get::<_, String>(0),
             )
             .optional()
@@ -1391,13 +1399,14 @@ impl SqliteStore {
                 )
                 .map_err(|source| StoreError::Sqlite { source })?;
         }
-        let ordinal: u64 = transaction
+        let stored_ordinal: i64 = transaction
             .query_row(
                 "SELECT COALESCE(MAX(ordinal) + 1, 0) FROM reconciliations WHERE attempt_id = ?1",
                 [attempt.id.as_str()],
                 |row| row.get(0),
             )
             .map_err(|source| StoreError::Sqlite { source })?;
+        let ordinal = stored_unsigned("reconciliation ordinal", stored_ordinal)?;
         let now = Timestamp::now().to_string();
         let challenge = crate::domain::ArtifactDigest::sha256(
             format!("reconcile:{}:{}:{}:{}", attempt.id, request, ordinal, now).as_bytes(),
@@ -1415,7 +1424,7 @@ impl SqliteStore {
         };
         transaction.execute(
             "INSERT INTO reconciliations (request_id, attempt_id, ordinal, state, json) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![record.request.as_str(), record.attempt.as_str(), ordinal, reconciliation_state_text(record.state), encode(&record)?],
+            params![record.request.as_str(), record.attempt.as_str(), sqlite_unsigned("reconciliation ordinal", ordinal)?, reconciliation_state_text(record.state), encode(&record)?],
         ).map_err(|source| StoreError::Sqlite { source })?;
         // A partial effect is unresolved; once a fresh investigation begins it is
         // represented as Unknown until evidence proves completion.
@@ -1727,6 +1736,27 @@ fn decode<T: DeserializeOwned>(value: &str) -> Result<T, StoreError> {
     serde_json::from_str(value).map_err(|source| StoreError::Json { source })
 }
 
+fn sqlite_unsigned(field: &'static str, value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::IntegerOutOfRange { field, value })
+}
+
+fn sqlite_index(field: &'static str, value: usize) -> Result<i64, StoreError> {
+    let value = u64::try_from(value).map_err(|_| StoreError::IntegerOutOfRange {
+        field,
+        value: u64::MAX,
+    })?;
+    sqlite_unsigned(field, value)
+}
+
+fn stored_unsigned(field: &'static str, value: i64) -> Result<u64, StoreError> {
+    u64::try_from(value).map_err(|_| StoreError::NegativeStoredInteger { field, value })
+}
+
+fn stored_index(field: &'static str, value: i64) -> Result<usize, StoreError> {
+    let value = stored_unsigned(field, value)?;
+    usize::try_from(value).map_err(|_| StoreError::IntegerOutOfRange { field, value })
+}
+
 fn load_entity_from<T: DeserializeOwned>(
     connection: &Connection,
     table: &str,
@@ -2010,4 +2040,29 @@ fn same_halted_run_abandonment(
         && left.resources == right.resources
         && left.justification_evidence == right.justification_evidence
         && left.authorized_by == right.authorized_by
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StoreError, sqlite_unsigned, stored_unsigned};
+
+    #[test]
+    fn sqlite_unsigned_preserves_the_signed_sqlite_boundary() {
+        assert!(matches!(
+            sqlite_unsigned("ordinal", i64::MAX as u64),
+            Ok(value) if value == i64::MAX
+        ));
+        assert!(matches!(
+            sqlite_unsigned("ordinal", i64::MAX as u64 + 1),
+            Err(StoreError::IntegerOutOfRange { .. })
+        ));
+    }
+
+    #[test]
+    fn stored_unsigned_rejects_negative_database_values() {
+        assert!(matches!(
+            stored_unsigned("ordinal", -1),
+            Err(StoreError::NegativeStoredInteger { .. })
+        ));
+    }
 }

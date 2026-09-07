@@ -143,7 +143,7 @@ fn verify_executable_digest(config: &VideoConfig) -> Result<(), InstrumentError>
         })?;
         digest.update(chunk);
     }
-    let actual = format!("{:x}", digest.finalize());
+    let actual = hex::encode(digest.finalize());
     if actual != config.executable_sha256 {
         return Err(InstrumentError::VideoExecutableDigestMismatch {
             expected: config.executable_sha256.clone(),
@@ -385,6 +385,6 @@ mod tests {
 
     fn digest(path: &Path) -> String {
         let bytes = fs::read(path).unwrap_or_else(|error| panic!("read executable: {error}"));
-        format!("{:x}", Sha256::digest(bytes))
+        hex::encode(Sha256::digest(bytes))
     }
 }

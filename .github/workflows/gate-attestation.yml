@@ -33,28 +33,25 @@ jobs:
       full_gate_timeout_minutes: 45
       ai_attribution_check: true
       docs_only_exemption: true
-
-
-  # Kanon is source-only and private, so it remains independent of the required
-  # hybrid gate.  A missing credential is a skipped job, never a successful
-  # claim that standards were checked; provisioning it makes this a real lint.
-  check-fleet-repo-token:
-    name: Check FLEET_REPO_TOKEN
-    timeout-minutes: 15
-    runs-on: ubuntu-latest
-    outputs:
-      present: ${{ steps.check.outputs.present }}
-    steps:
-      - id: check
-        run: echo "present=${{ secrets.FLEET_REPO_TOKEN != '' }}" >> "$GITHUB_OUTPUT"
-
+  # Kanon is private. Only accepted main commits may use this separate,
+  # non-required lint job. The environment permits the main branch only and
+  # holds a deploy key with read-only access to the Kanon repository alone.
   kanon-lint:
     name: kanon lint
-    needs: check-fleet-repo-token
-    if: needs.check-fleet-repo-token.outputs.present == 'true'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: kanon-standards
     timeout-minutes: 45
     runs-on: ubuntu-latest
     steps:
+      - name: Require scoped standards credential
+        env:
+          KANON_READ_KEY: ${{ secrets.KANON_STANDARDS_READ_KEY }}
+        run: |
+          if [ -z "$KANON_READ_KEY" ]; then
+            echo '::error::The kanon-standards environment needs its read-only deploy key.'
+            exit 1
+          fi
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           path: cheirismos
@@ -65,18 +62,34 @@ jobs:
           repository: forkwright/kanon
           ref: ca93807557555142b600a058c8faf6adc1cde389
           path: kanon
-          token: ${{ secrets.FLEET_REPO_TOKEN }}
+          ssh-key: ${{ secrets.KANON_STANDARDS_READ_KEY }}
           persist-credentials: false
 
       - uses: actions-rust-lang/setup-rust-toolchain@166cdcfd11aee3cb47222f9ddb555ce30ddb9659 # v1.17.0
         with:
           cache: false
+          matcher: false
+          rust-src-dir: kanon
 
-      # WHY: Kanon contains private fleet material. Its checkout and compiled
-      # artifacts must stay on this ephemeral runner, outside public caches.
-      - name: Install kanon
-        run: cargo install --path kanon/crates/pragma --bin kanon --no-default-features --locked
+      # WHY: neither private source, diagnostics, nor compiled artifacts may
+      # enter public logs, annotations, caches, or uploaded artifacts. These
+      # files remain on this job's ephemeral runner. Failure is still visible.
+      - name: Build kanon
+        working-directory: kanon
+        run: |
+          if ! cargo build --locked --package pragma --bin kanon --no-default-features \
+            > "$RUNNER_TEMP/kanon-build.log" 2>&1; then
+            echo '::error::Pinned Kanon build failed. Reproduce privately at the workflow revision.'
+            exit 1
+          fi
+          test "$(target/debug/kanon build-sha)" = "$(git rev-parse HEAD)"
 
       - name: Lint standards errors
         working-directory: cheirismos
-        run: kanon lint . --summary --min-severity error
+        run: |
+          if ! ../kanon/target/debug/kanon lint . --summary --min-severity error \
+            > "$RUNNER_TEMP/kanon-lint.log" 2>&1; then
+            echo '::error::Kanon standards lint failed. Run the pinned Kanon lint privately for diagnostics.'
+            exit 1
+          fi
+          echo 'Kanon standards lint passed at error severity.'
