@@ -3,9 +3,9 @@
 The required `gate / gate` check comes from the pinned fleet hybrid workflow.
 It validates a local gate attestation or runs formatting, compilation, strict
 Clippy, nextest, and doctests. Main pushes run the integrated code through the
-build path. Security and CodeQL run separately. Main requires a pull request
-and the GitHub Actions application-bound gate check; force pushes and branch
-deletion are disabled.
+build path. Security and CodeQL run separately. Main protection requires a pull
+request and the GitHub Actions application-bound gate check, with the fleet's
+administrator exemption retained. Force pushes and branch deletion are disabled.
 
 ## Private standards lint
 
@@ -19,10 +19,15 @@ The `kanon-standards` GitHub environment permits only the `main` branch. Its
 access to the Kanon repository alone. It is an environment secret, not a
 repository or organization secret. Missing access fails the main job.
 
+Accepted main workflow code is trusted with this environment's access; the
+branch restriction does not constrain what an authorized main workflow can do.
+Review workflow changes with that access in mind.
+
 Kanon is built on a separate ephemeral hosted runner without caching. The
-checkout does not persist its credential. Private source, build products,
-diagnostics, and lint output stay on that runner and are never uploaded as
-public artifacts or annotations. A failed job reports the failing stage; a
+checkout does not persist its credential. Private source contents, build
+products, compiler diagnostics, and lint findings stay on that runner and are
+never uploaded as public artifacts or annotations. The job reports checkout
+and toolchain versions. A failed job reports the failing stage; a
 fleet contributor reproduces it privately using the pinned revision:
 
 ```bash
