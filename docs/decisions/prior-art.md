@@ -59,8 +59,9 @@ The deeper comparison adds these boundaries:
   Fixed semantic drivers must bound such operations and polling loops.
 - Evaluate [UEFIExtract report mode](https://github.com/LongSoft/UEFITool/blob/dac91b26733ca21cb204e41614c1b8c81cc50860/UEFIExtract/uefiextract_main.cpp#L71-L119)
   as the first contained offline adapter. Device access, credentials, network,
-  writable authoritative state and unbounded output must be absent from the
-  transform process. Source inspection is not adapter qualification.
+  unrelated host/private files, writable authoritative state and unbounded
+  output must be absent from the transform process. Use digest-verified staged
+  inputs, not evidence-store paths. Source inspection is not adapter qualification.
 
 ### Repeated full-read evidence
 
@@ -73,6 +74,7 @@ agreement is the default requirement of a dependent target-recovery policy;
 disagreement blocks that policy's candidate authorization and erase/write.
 Offline candidate construction and unrelated qualification patterns remain
 separate. Agreement proves repeatability, not correct wiring or authentic bytes.
+Simulated acquisitions cannot establish physical recovery eligibility.
 A majority-vote result, when a future reviewed policy explicitly requests one,
 is a derived uncertain artifact;
 it must never masquerade as an acquired original or satisfy the exact-agreement
