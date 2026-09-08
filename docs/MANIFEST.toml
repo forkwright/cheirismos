@@ -53,6 +53,6 @@ decided = "2026-09-06"
 [[doc]]
 path = "docs/decisions/prior-art.md"
 type = "decision-record"
-evergreen = true
+evergreen = false
 description = "Accepted prior-art reuse and dependency-boundary decisions."
-decided = "2026-09-07"
+decided = "2026-09-08"
